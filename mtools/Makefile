@@ -1,10 +1,11 @@
 topdir = ..
-include $(topdir)/MCONFIG
+MAKEDIR = $(topdir)/mk
+include $(MAKEDIR)/syslinux.mk
 
 OPTFLAGS = -g -Os
 INCLUDES = -I. -I.. -I../libfat -I../libinstaller
 CFLAGS	 = $(GCCWARN) -D_FILE_OFFSET_BITS=64 $(OPTFLAGS) $(INCLUDES)
-LDFLAGS	 = -s
+LDFLAGS	 = 
 
 SRCS     = syslinux.c \
 	   ../libinstaller/fat.c \
@@ -35,6 +36,9 @@ installer: syslinux
 
 syslinux: $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
+
+strip:
+	$(STRIP) syslinux
 
 %.o: %.c
 	$(CC) $(UMAKEDEPS) $(CFLAGS) -c -o $@ $<

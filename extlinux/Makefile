@@ -15,13 +15,14 @@
 ##
 
 topdir = ..
-include $(topdir)/MCONFIG
+MAKEDIR = $(topdir)/mk
+include $(MAKEDIR)/syslinux.mk
 
 OPTFLAGS = -g -Os
 INCLUDES = -I. -I.. -I../libinstaller
 CFLAGS	 = $(GCCWARN) -Wno-sign-compare -D_FILE_OFFSET_BITS=64 \
 	   $(OPTFLAGS) $(INCLUDES)
-LDFLAGS	 = # -s
+LDFLAGS	 = 
 
 SRCS     = main.c \
 	   ../libinstaller/syslxmod.c \
@@ -52,6 +53,9 @@ installer: extlinux
 
 extlinux: $(OBJS)
 	$(CC) $(LDFLAGS) -o $@ $^
+
+strip:
+	$(STRIP) extlinux
 
 %.o: %.c
 	$(CC) $(UMAKEDEPS) $(CFLAGS) -c -o $@ $<
