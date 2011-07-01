@@ -385,11 +385,10 @@ static int sl_initramfs_load_archive(lua_State * L)
 static int sl_initramfs_add_file(lua_State * L)
 {
     struct initramfs *initramfs = luaL_checkudata(L, 1, SYSLINUX_FILE);
-    struct syslinux_file *file_data = luaL_checkudata(L, 2, SYSLINUX_FILE);
+    struct syslinux_file *file = luaL_checkudata(L, 2, SYSLINUX_FILE);
     const char *dst_filename = luaL_checkstring(L, 3);
-    size_t file_len = file_data->size;
-
-    return initramfs_add_file(initramfs, file_data, file_len, file_len, dst_filename, 1, 0755);
+    size_t file_len = file->size;
+    return initramfs_add_file(initramfs, file->data, file_len, file_len, dst_filename, 0, 0755);
 }
 
 static int sl_boot_it(lua_State * L)
