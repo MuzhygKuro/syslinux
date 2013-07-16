@@ -72,16 +72,23 @@ int main(const int argc, const char *argv[])
     clear_screen();
     printf("\033[1;1H");
 
-    printf("%s\n", version_string);
+    more_printf("%s\n", version_string);
+
+    int return_code = 0;
 
     if (!menumode || automode)
 	start_cli_mode(&hardware);
     else {
-	int return_code = start_menu_mode(&hardware, version_string);
+	return_code = start_menu_mode(&hardware, version_string);
 	if (return_code == HDT_RETURN_TO_CLI)
 	    start_cli_mode(&hardware);
-	else
-	    return return_code;
     }
-    return 0;
+
+    /* Do we got request to do something at exit time ? */
+    if (strlen(hardware.postexec)>0) {
+	    more_printf("Executing postexec instructions : %s\n",hardware.postexec);
+	    runsyslinuxcmd(hardware.postexec);
+    }
+
+    return return_code;
 }

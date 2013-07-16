@@ -66,6 +66,9 @@
 #define CLI_ENABLE "enable"
 #define CLI_DISABLE "disable"
 #define CLI_DUMP "dump"
+#define CLI_SAY "say"
+#define CLI_DISPLAY "display"
+#define CLI_SLEEP "sleep"
 
 typedef enum {
     INVALID_MODE,
@@ -120,6 +123,7 @@ struct cli_module_descr {
 struct cli_callback_descr {
     const char *name;
     void (*exec) (int argc, char **argv, struct s_hardware * hardware);
+    bool nomodule;
 };
 
 /* Manage aliases */

@@ -63,6 +63,9 @@ void detect_parameters(const int argc, const char *argv[],
     /* Quiet mode - make the output more quiet */
     quiet = true;
 
+    /* Silent mode - make not output at all */
+    silent = false;
+
     /* Vesa mode isn't set until we explictly call it */
     vesamode = false;
 
@@ -75,6 +78,8 @@ void detect_parameters(const int argc, const char *argv[],
     for (int i = 1; i < argc; i++) {
 	if (!strncmp(argv[i], "quiet", 5)) {
 	    quiet = true;
+	} else if (!strncmp(argv[i], "silent", 6)) {
+	    silent = true;
 	} else	if (!strncmp(argv[i], "verbose", 7)) {
 	    quiet = false;
 	} else if (!strncmp(argv[i], "modules_pcimap=", 15)) {
@@ -106,12 +111,36 @@ void detect_parameters(const int argc, const char *argv[],
 	    max_console_lines = MAX_CLI_LINES;
 	} else if (!strncmp(argv[i], "nomenu", 6)) {
 	    menumode = false;
+	} else if (!strncmp(argv[i], "dump_filename=", 14)) {
+	    strlcpy(hardware->dump_filename, argv[i] + 14,
+		    sizeof(hardware->dump_filename));
 	} else if (!strncmp(argv[i], "dump_path=", 10)) {
 	    strlcpy(hardware->dump_path, argv[i] + 10,
 		    sizeof(hardware->dump_path));
 	} else if (!strncmp(argv[i], "tftp_ip=", 8)) {
 	    strlcpy(hardware->tftp_ip, argv[i] + 8,
 		    sizeof(hardware->tftp_ip));
+	} else if (!strncmp(argv[i], "postexec=", 9)) {
+	    /* The postexec= parameter is separated in several argv[]
+	     * as it can contains spaces.
+	     * We use the AUTO_DELIMITER char to define the limits
+	     * of this parameter.
+	     * i.e postexec='linux memtest.bin'
+	     */
+
+	    char *argument = (char*)argv[i]+10;
+	    /* Extracting the first parameter */
+	    strcpy(hardware->postexec, argument);
+
+	    /* While we can't find the other AUTO_DELIMITER, let's process the argv[] */
+	    while ((strchr(argument, AUTO_DELIMITER) == NULL) && (i+1<argc)) {
+		i++;
+	    	argument = (char *)argv[i];
+		strcat(hardware->postexec, " ");
+		strcat(hardware->postexec, argument);
+	    } 
+	
+	     hardware->postexec[strlen(hardware->postexec) - 1] = 0;
 	} else if (!strncmp(argv[i], "auto=", 5)) {
 	    /* The auto= parameter is separated in several argv[]
 	     * as it can contains spaces.
@@ -204,9 +233,12 @@ void init_hardware(struct s_hardware *hardware)
     memset(hardware->memtest_label, 0, sizeof hardware->memtest_label);
     memset(hardware->auto_label, 0, sizeof hardware->auto_label);
     memset(hardware->dump_path, 0, sizeof hardware->dump_path);
+    memset(hardware->dump_filename, 0, sizeof hardware->dump_filename);
     memset(hardware->vesa_background, 0, sizeof hardware->vesa_background);
     memset(hardware->tftp_ip, 0, sizeof hardware->tftp_ip);
+    memset(hardware->postexec, 0, sizeof hardware->postexec);
     strcat(hardware->dump_path, "hdt");
+    strcat(hardware->dump_filename, "%{m}+%{p}+%{v}");
     strcat(hardware->pciids_path, "pci.ids");
     strcat(hardware->modules_pcimap_path, "modules.pcimap");
     strcat(hardware->modules_alias_path, "modules.alias");
@@ -712,8 +744,8 @@ void detect_hardware(struct s_hardware *hardware)
     if (!quiet)
         more_printf("DMI: Detecting Table\n");
     if (detect_dmi(hardware) == -ENODMITABLE) {
-        printf("DMI: ERROR ! Table not found ! \n");
-        printf("DMI: Many hardware components will not be detected ! \n");
+        more_printf("DMI: ERROR ! Table not found ! \n");
+        more_printf("DMI: Many hardware components will not be detected ! \n");
     } else {
         if (!quiet)
             more_printf("DMI: Table found ! (version %u.%u)\n",

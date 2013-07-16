@@ -1,7 +1,7 @@
 /* ----------------------------------------------------------------------- *
  *
  *   Copyright 1998-2008 H. Peter Anvin - All Rights Reserved
- *   Copyright 2009-2010 Intel Corporation; author: H. Peter Anvin
+ *   Copyright 2009-2012 Intel Corporation; author: H. Peter Anvin
  *
  *   This program is free software; you can redistribute it and/or modify
  *   it under the terms of the GNU General Public License as published by
@@ -52,6 +52,7 @@
 #include "syslxfs.h"
 #include "setadv.h"
 #include "syslxopt.h" /* unified options */
+#include "mountinfo.h"
 
 #ifdef DEBUG
 # define dprintf printf
@@ -75,7 +76,7 @@ static char subvol[BTRFS_SUBVOL_MAX];
 /*
  * Get the size of a block device
  */
-uint64_t get_size(int devfd)
+static uint64_t get_size(int devfd)
 {
     uint64_t bytes;
     uint32_t sects;
@@ -209,7 +210,7 @@ ok:
  *
  * Returns the number of modified bytes in the boot file.
  */
-int patch_file_and_bootblock(int fd, const char *dir, int devfd)
+static int patch_file_and_bootblock(int fd, const char *dir, int devfd)
 {
     struct stat dirst, xdst;
     struct hd_geometry geo;
@@ -342,7 +343,7 @@ int install_bootblock(int fd, const char *device)
 		perror("reading superblock");
 		return 1;
 	}
-	if (sb2.magic == *(u64 *)BTRFS_MAGIC)
+	if (!memcmp(sb2.magic, BTRFS_MAGIC, BTRFS_MAGIC_L))
 		ok = true;
     } else if (fs_type == VFAT) {
 	if (xpread(fd, &sb3, sizeof sb3, 0) != sizeof sb3) {
@@ -535,35 +536,6 @@ static int test_issubvolume(char *path)
 }
 
 /*
- * Get file handle for a file or dir
- */
-static int open_file_or_dir(const char *fname)
-{
-        int ret;
-        struct stat st;
-        DIR *dirstream;
-        int fd;
-
-        ret = stat(fname, &st);
-        if (ret < 0) {
-                return -1;
-        }
-        if (S_ISDIR(st.st_mode)) {
-                dirstream = opendir(fname);
-                if (!dirstream) {
-                        return -2;
-                }
-                fd = dirfd(dirstream);
-        } else {
-                fd = open(fname, O_RDWR);
-        }
-        if (fd < 0) {
-                return -3;
-        }
-        return fd;
-}
-
-/*
  * Get the default subvolume of a btrfs filesystem
  *   rootdir: btrfs root dir
  *   subvol:  this function will save the default subvolume name here
@@ -585,7 +557,7 @@ static char * get_default_subvol(char * rootdir, char * subvol)
 
     ret = test_issubvolume(rootdir);
     if (ret == 1) {
-        fd = open_file_or_dir(rootdir);
+        fd = open(rootdir, O_RDONLY);
         if (fd < 0) {
             fprintf(stderr, "ERROR: failed to open %s\n", rootdir);
         }
@@ -774,7 +746,7 @@ static char * get_default_subvol(char * rootdir, char * subvol)
    return subvol;
 }
 
-int install_file(const char *path, int devfd, struct stat *rst)
+static int install_file(const char *path, int devfd, struct stat *rst)
 {
 	if (fs_type == EXT2 || fs_type == VFAT || fs_type == NTFS)
 		return ext2_fat_install_file(path, devfd, rst);
@@ -794,17 +766,33 @@ static void device_cleanup(void)
 
 /* Verify that a device fd and a pathname agree.
    Return 0 on valid, -1 on error. */
+static int validate_device_btrfs(int pathfd, int devfd);
 static int validate_device(const char *path, int devfd)
 {
     struct stat pst, dst;
     struct statfs sfs;
+    int pfd;
+    int rv = -1;
+    
+    pfd = open(path, O_RDONLY|O_DIRECTORY);
+    if (pfd < 0)
+	goto err;
 
-    if (stat(path, &pst) || fstat(devfd, &dst) || statfs(path, &sfs))
-	return -1;
+    if (fstat(pfd, &pst) || fstat(devfd, &dst) || statfs(path, &sfs))
+	goto err;
+
     /* btrfs st_dev is not matched with mnt st_rdev, it is a known issue */
-    if (fs_type == BTRFS && sfs.f_type == BTRFS_SUPER_MAGIC)
-	return 0;
-    return (pst.st_dev == dst.st_rdev) ? 0 : -1;
+    if (fs_type == BTRFS) {
+	if (sfs.f_type == BTRFS_SUPER_MAGIC)
+	    rv = validate_device_btrfs(pfd, devfd);
+    } else {
+	rv = (pst.st_dev == dst.st_rdev) ? 0 : -1;
+    }
+
+err:
+    if (pfd >= 0)
+	close(pfd);
+    return rv;
 }
 
 #ifndef __KLIBC__
@@ -825,47 +813,46 @@ static const char *find_device(const char *mtab_file, dev_t dev)
 	/* btrfs st_dev is not matched with mnt st_rdev, it is a known issue */
 	switch (fs_type) {
 	case BTRFS:
-		if (!strcmp(mnt->mnt_type, "btrfs") &&
-		    !stat(mnt->mnt_dir, &dst) &&
-		    dst.st_dev == dev) {
-	                if (!subvol[0]) {
-			    get_default_subvol(mnt->mnt_dir, subvol);
-                        }
-			done = true;
-		}
-		break;
+	    if (!strcmp(mnt->mnt_type, "btrfs") &&
+		!stat(mnt->mnt_dir, &dst) &&
+		dst.st_dev == dev) {
+		if (!subvol[0])
+		    get_default_subvol(mnt->mnt_dir, subvol);
+		done = true;
+	    }
+	    break;
 	case EXT2:
-		if ((!strcmp(mnt->mnt_type, "ext2") ||
-		     !strcmp(mnt->mnt_type, "ext3") ||
-		     !strcmp(mnt->mnt_type, "ext4")) &&
-		    !stat(mnt->mnt_fsname, &dst) &&
-		    dst.st_rdev == dev) {
-		    done = true;
-		    break;
-		}
+	    if ((!strcmp(mnt->mnt_type, "ext2") ||
+		 !strcmp(mnt->mnt_type, "ext3") ||
+		 !strcmp(mnt->mnt_type, "ext4")) &&
+		!stat(mnt->mnt_fsname, &dst) &&
+		dst.st_rdev == dev) {
+		done = true;
+		break;
+	    }
 	case VFAT:
-		if ((!strcmp(mnt->mnt_type, "vfat")) &&
-		    !stat(mnt->mnt_fsname, &dst) &&
-		    dst.st_rdev == dev) {
-		    done = true;
-		    break;
-		}
-    case NTFS:
-        if ((!strcmp(mnt->mnt_type, "fuseblk") /* ntfs-3g */ ||
-             !strcmp(mnt->mnt_type, "ntfs")) &&
-            !stat(mnt->mnt_fsname, &dst) &&
-            dst.st_rdev == dev) {
-            done = true;
-            break;
-        }
+	    if ((!strcmp(mnt->mnt_type, "vfat")) &&
+		!stat(mnt->mnt_fsname, &dst) &&
+		dst.st_rdev == dev) {
+		done = true;
+		break;
+	    }
+	case NTFS:
+	    if ((!strcmp(mnt->mnt_type, "fuseblk") /* ntfs-3g */ ||
+		 !strcmp(mnt->mnt_type, "ntfs")) &&
+		!stat(mnt->mnt_fsname, &dst) &&
+		dst.st_rdev == dev) {
+		done = true;
+		break;
+	    }
 
-        break;
+	    break;
 	case NONE:
 	    break;
 	}
 	if (done) {
-		devname = strdup(mnt->mnt_fsname);
-		break;
+	    devname = strdup(mnt->mnt_fsname);
+	    break;
 	}
     }
     endmntent(mtab);
@@ -873,6 +860,158 @@ static const char *find_device(const char *mtab_file, dev_t dev)
     return devname;
 }
 #endif
+
+/*
+ * On newer Linux kernels we can use sysfs to get a backwards mapping
+ * from device names to standard filenames
+ */
+static const char *find_device_sysfs(dev_t dev)
+{
+    char sysname[64];
+    char linkname[PATH_MAX];
+    ssize_t llen;
+    char *p, *q;
+    char *buf = NULL;
+    struct stat st;
+
+    snprintf(sysname, sizeof sysname, "/sys/dev/block/%u:%u",
+	     major(dev), minor(dev));
+
+    llen = readlink(sysname, linkname, sizeof linkname);
+    if (llen < 0 || llen >= sizeof linkname)
+	goto err;
+
+    linkname[llen] = '\0';
+
+    p = strrchr(linkname, '/');
+    p = p ? p+1 : linkname;	/* Leave basename */
+
+    buf = q = malloc(strlen(p) + 6);
+    if (!buf)
+	goto err;
+
+    memcpy(q, "/dev/", 5);
+    q += 5;
+
+    while (*p) {
+	*q++ = (*p == '!') ? '/' : *p;
+	p++;
+    }
+
+    *q = '\0';
+
+    if (!stat(buf, &st) && st.st_dev == dev)
+	return buf;		/* Found it! */
+
+err:
+    if (buf)
+	free(buf);
+    return NULL;
+}
+
+static const char *find_device_mountinfo(const char *path, dev_t dev)
+{
+    const struct mountinfo *m;
+    struct stat st;
+
+    m = find_mount(path, NULL);
+
+    if (m->devpath[0] == '/' && m->dev == dev &&
+	!stat(m->devpath, &st) && S_ISBLK(st.st_mode) && st.st_rdev == dev)
+	return m->devpath;
+    else
+	return NULL;
+}
+
+static int validate_device_btrfs(int pfd, int dfd)
+{
+    struct btrfs_ioctl_fs_info_args fsinfo;
+    static struct btrfs_ioctl_dev_info_args devinfo;
+    struct btrfs_super_block sb2;
+
+    if (ioctl(pfd, BTRFS_IOC_FS_INFO, &fsinfo))
+	return -1;
+
+    /* We do not support multi-device btrfs yet */
+    if (fsinfo.num_devices != 1)
+	return -1;
+
+    /* The one device will have the max devid */
+    memset(&devinfo, 0, sizeof devinfo);
+    devinfo.devid = fsinfo.max_id;
+    if (ioctl(pfd, BTRFS_IOC_DEV_INFO, &devinfo))
+	return -1;
+
+    if (devinfo.path[0] != '/')
+	return -1;
+
+    if (xpread(dfd, &sb2, sizeof sb2, BTRFS_SUPER_INFO_OFFSET) != sizeof sb2)
+	return -1;
+
+    if (memcmp(sb2.magic, BTRFS_MAGIC, BTRFS_MAGIC_L))
+	return -1;
+
+    if (memcmp(sb2.fsid, fsinfo.fsid, sizeof fsinfo.fsid))
+	return -1;
+
+    if (sb2.num_devices != 1)
+	return -1;
+
+    if (sb2.dev_item.devid != devinfo.devid)
+	return -1;
+
+    if (memcmp(sb2.dev_item.uuid, devinfo.uuid, sizeof devinfo.uuid))
+	return -1;
+
+    if (memcmp(sb2.dev_item.fsid, fsinfo.fsid, sizeof fsinfo.fsid))
+	return -1;
+
+    return 0;			/* It's good! */
+}    
+
+static const char *find_device_btrfs(const char *path)
+{
+    int pfd, dfd;
+    struct btrfs_ioctl_fs_info_args fsinfo;
+    static struct btrfs_ioctl_dev_info_args devinfo;
+    const char *rv = NULL;
+
+    pfd = dfd = -1;
+
+    pfd = open(path, O_RDONLY);
+    if (pfd < 0)
+	goto err;
+
+    if (ioctl(pfd, BTRFS_IOC_FS_INFO, &fsinfo))
+	goto err;
+
+    /* We do not support multi-device btrfs yet */
+    if (fsinfo.num_devices != 1)
+	goto err;
+
+    /* The one device will have the max devid */
+    memset(&devinfo, 0, sizeof devinfo);
+    devinfo.devid = fsinfo.max_id;
+    if (ioctl(pfd, BTRFS_IOC_DEV_INFO, &devinfo))
+	goto err;
+
+    if (devinfo.path[0] != '/')
+	goto err;
+
+    dfd = open((const char *)devinfo.path, O_RDONLY);
+    if (dfd < 0)
+	goto err;
+
+    if (!validate_device_btrfs(pfd, dfd))
+	rv = (const char *)devinfo.path; /* It's good! */
+
+err:
+    if (pfd >= 0)
+	close(pfd);
+    if (dfd >= 0)
+	close(dfd);
+    return rv;
+}
 
 static const char *get_devname(const char *path)
 {
@@ -888,34 +1027,57 @@ static const char *get_devname(const char *path)
 	fprintf(stderr, "%s: statfs %s: %s\n", program, path, strerror(errno));
 	return devname;
     }
-#ifdef __KLIBC__
 
-    /* klibc doesn't have getmntent and friends; instead, just create
-       a new device with the appropriate device type */
-    snprintf(devname_buf, sizeof devname_buf, "/tmp/dev-%u:%u",
-	     major(st.st_dev), minor(st.st_dev));
+    if (opt.device)
+	devname = opt.device;
 
-    if (mknod(devname_buf, S_IFBLK | 0600, st.st_dev)) {
-	fprintf(stderr, "%s: cannot create device %s\n", program, devname);
-	return devname;
+    if (!devname){
+	if (fs_type == BTRFS) {
+	    /* For btrfs try to get the device name from btrfs itself */
+	    devname = find_device_btrfs(path);
+	}
     }
 
-    atexit(device_cleanup);	/* unlink the device node on exit */
-    devname = devname_buf;
+    if (!devname) {
+	devname = find_device_mountinfo(path, st.st_dev);
+    }
+
+#ifdef __KLIBC__
+    if (!devname) {
+	devname = find_device_sysfs(st.st_dev);
+    }
+    if (!devname) {
+	/* klibc doesn't have getmntent and friends; instead, just create
+	   a new device with the appropriate device type */
+	snprintf(devname_buf, sizeof devname_buf, "/tmp/dev-%u:%u",
+		 major(st.st_dev), minor(st.st_dev));
+
+	if (mknod(devname_buf, S_IFBLK | 0600, st.st_dev)) {
+	    fprintf(stderr, "%s: cannot create device %s\n", program, devname);
+	    return devname;
+	}
+	
+	atexit(device_cleanup);	/* unlink the device node on exit */
+	devname = devname_buf;
+    }
 
 #else
-
-    devname = find_device("/proc/mounts", st.st_dev);
+    if (!devname) {
+	devname = find_device("/proc/mounts", st.st_dev);
+    }
     if (!devname) {
 	/* Didn't find it in /proc/mounts, try /etc/mtab */
         devname = find_device("/etc/mtab", st.st_dev);
     }
     if (!devname) {
+	devname = find_device_sysfs(st.st_dev);
+
 	fprintf(stderr, "%s: cannot find device for path %s\n", program, path);
 	return devname;
     }
 
     fprintf(stderr, "%s is device %s\n", path, devname);
+
 #endif
     return devname;
 }
@@ -994,7 +1156,7 @@ static int ext_read_adv(const char *path, int devfd, const char **namep)
 	if (err == 2)		/* ldlinux.sys does not exist */
 	    err = read_adv(path, name = "extlinux.sys");
 	if (namep)
-	    *namep = name; 
+	    *namep = name;
 	return err;
     }
 }
@@ -1012,7 +1174,7 @@ static int ext_write_adv(const char *path, const char *cfg, int devfd)
     return write_adv(path, cfg);
 }
 
-int install_loader(const char *path, int update_only)
+static int install_loader(const char *path, int update_only)
 {
     struct stat st, fst;
     int devfd, rv;
@@ -1074,9 +1236,7 @@ int modify_existing_adv(const char *path)
     if (devfd < 0)
 	return 1;
 
-    if (opt.reset_adv)
-	syslinux_reset_adv(syslinux_adv);
-    else if (ext_read_adv(path, devfd, &filename) < 0) {
+    if (ext_read_adv(path, devfd, &filename) < 0) {
 	close(devfd);
 	return 1;
     }
